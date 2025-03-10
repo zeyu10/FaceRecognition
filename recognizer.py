@@ -1,121 +1,142 @@
-import os
-import cv2
-import time
-import random
-import inspect
 import numpy as np
+import Config
 
-script_directory = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 
-class FaceRecognizer():
-    train_faces_percentage = 0.8
-    total_train_faces = 0
-    total_test_faces = 0
-    dataset_train = {}
-    dataset_test = {}
-    image_width = -1
-    image_height = -1
-    k = 75 # 保留前k个主成分
+class Recognizer:
+    def __init__(self):
+        self.train_matrix = None
+        self.train_labels = None
+        self.test_matrix = None
+        self.test_labels = None
+        self.mean_face = None
+        self.centered_data = None
+        self.eigenfaces = None
+        self.train_weights = None
+        self.is_model_trained = False
+        self.k = Config.CANDIDATE_K[0]
+        self.distance_threshold = 0.0
 
-    def __init__(self, dataset_path, width, height):
-        self.image_width = width
-        self.image_height = height
-        for root, dirs, files in os.walk(dataset_path):
-            data_list = []
-            class_name = root.split("\\")[-1]
-            for file in files:
-                data_list.append(os.path.join(root, file))
-            
-            random.shuffle(data_list)
-            train_size = int(len(data_list) * self.train_faces_percentage)
-            self.dataset_train[class_name] = data_list[:train_size]
-            self.dataset_test[class_name] = data_list[train_size:]
-            self.total_train_faces += len(self.dataset_train[class_name])
-            self.total_test_faces += len(self.dataset_test[class_name])
+    def load_data(self, train_matrix, train_labels, test_matrix, test_labels):
+        self.train_matrix = train_matrix
+        self.train_labels = train_labels
+        self.test_matrix = test_matrix
+        self.test_labels = test_labels
 
-        print(f"Total train faces: {self.total_train_faces}, Total test faces: {self.total_test_faces}")
-        
+    def fit(self, keep_components_ratio):
+        self.mean_face = self.train_matrix.mean(axis=1, keepdims=True)
+        self.centered_data = self.train_matrix - self.mean_face
 
-    def train(self):
-        if self.total_train_faces <= 2:
-            print("Not enough train faces to train the model.")
-            return
-
-        print("Training started...")
-        start_time = time.perf_counter()
-        self.label = []
-        self.model = np.empty(shape=(self.image_width * self.image_height, self.total_train_faces),dtype=np.float64)
-        index = 0
-        self.tracer = []
-        for class_name, data_list in self.dataset_train.items():
-            for image_path in data_list:
-                image = cv2.imread(image_path)
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-                image_data = np.array(image, dtype = "float64").flatten()
-                self.model[:,index] = image_data[:]
-                self.label.append(class_name)
-                self.tracer.append(image_path)
-                index += 1
-        
-        self.mean = np.mean(self.model, axis=1)
-
-        for i in range(0, self.total_train_faces):
-            self.model[:,i] -= self.mean[:]
-        
-        cov_matrix = np.cov(self.model, rowvar=False)
-        # cov_matrix = np.matrix(self.model.T * self.model) / (self.total_train_faces - 1)
+        cov_matrix = np.dot(self.centered_data.T, self.centered_data) / (
+            self.train_matrix.shape[1] - 1
+        )
         eig_vals, eig_vecs = np.linalg.eig(cov_matrix)
-        sort_indices = np.argsort(eig_vals)[::-1]
-        eig_vals = eig_vals[sort_indices]
-        eig_vecs = eig_vecs[:,sort_indices]
-        
-        self.eig_vecs = eig_vecs[:,:self.k]
-        self.eig_vals = eig_vals[:self.k]
+        sorted_indices = np.argsort(eig_vals)[::-1]
+        eig_vecs = eig_vecs[:, sorted_indices]
+        eig_vals = eig_vals[sorted_indices]
 
-        self.eig_vecs = np.matmul(self.model, self.eig_vecs)
-        norms = np.linalg.norm(self.eig_vecs, axis=0)
-        self.eig_vecs /= norms
+        eig_vals_total = np.sum(eig_vals)
+        variance_explained = np.cumsum(eig_vals) / eig_vals_total
+        num_components = np.argmax(variance_explained >= keep_components_ratio) + 1
+        print("Number of components:", num_components)
 
-        self.model = np.matmul(self.eig_vecs.T, self.model)
+        eig_vecs = eig_vecs[:, :num_components]
+        self.eigenfaces = np.dot(self.centered_data, eig_vecs)
+        eigenface_norms = np.linalg.norm(self.eigenfaces, axis=0, keepdims=True)
+        eigenface_norms[eigenface_norms == 0] = 1
+        self.eigenfaces /= eigenface_norms
+        print(f"Eigenfaces shape: {self.eigenfaces.shape}")
 
-        end_time = time.perf_counter()
-        print(f"Training completed in {end_time - start_time:.3f} seconds.")
+        train_weights = np.dot(self.eigenfaces.T, self.centered_data)
+        train_weights_norms = np.linalg.norm(train_weights, axis=0, keepdims=True)
+        train_weights_norms[train_weights_norms == 0] = 1
+        train_weights /= train_weights_norms
+        self.train_weights = train_weights
 
+        squared = np.sum(self.train_weights**2, axis=0)
+        distance_matrix = (
+            squared[:, np.newaxis]
+            + squared[np.newaxis, :]
+            - 2 * np.dot(self.train_weights.T, self.train_weights)
+        )
+        np.fill_diagonal(distance_matrix, np.inf)
+        min_distances = np.min(distance_matrix, axis=1)
+
+        max_legal = np.max(min_distances)
+        mean = np.mean(min_distances)
+        std = np.std(min_distances)
+        mean_plus_3std = mean + 3 * std
+        self.distance_threshold = max(max_legal, mean_plus_3std)
+
+        print(f"Computed threshold: {self.distance_threshold: .2f}")
+        self.is_model_trained = True
 
     def evaluate(self):
-        if self.total_test_faces <= 0:
-            print("No test faces to evaluate.")
-            return
+        test_data_centered = self.test_matrix - self.mean_face
+        test_weights = np.dot(self.eigenfaces.T, test_data_centered)
+        test_weights_norms = np.linalg.norm(test_weights, axis=0, keepdims=True)
+        test_weights_norms[test_weights_norms == 0] = 1
+        test_weights /= test_weights_norms
 
-        print("Evaluating started...")
-        start_time = time.perf_counter()
-        correct_count = 0
-        for class_name, data_list in self.dataset_test.items():
-            for image_path in data_list:
-                image = cv2.imread(image_path)
-                print(f"Evaluating {image_path}...")
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-                image_data = np.array(image, dtype = "float64").flatten()
-                image_data -= self.mean[:]
-                image_data = np.matmul(self.eig_vecs.T, image_data)
-                diff = np.empty(shape=(self.k, self.total_train_faces), dtype=np.float64)
-                for j in range(0, self.total_train_faces):
-                    diff[:,j] = self.model[:,j] - image_data
-                norms = np.linalg.norm(diff, axis=0)
-                closest_face_index = np.argmin(norms)
-                print(f"Predicted class: {self.label[closest_face_index]}, Actual class: {class_name}")
-                if self.label[closest_face_index] != class_name:
-                    imgs = cv2.hconcat([cv2.imread(image_path),cv2.imread(self.tracer[closest_face_index])])
-                    cv2.imshow("Incorrect Match", imgs)
-                    cv2.waitKey(0)
-                if self.label[closest_face_index] == class_name:
-                    correct_count += 1
-        end_time = time.perf_counter()
-        print(f"Evaluating completed in {end_time - start_time:.3f} seconds.")
-        print(f"Accuracy: {correct_count / self.total_test_faces * 100.0}%")
+        test_sq = np.sum(test_weights**2, axis=0)
+        train_sq = np.sum(self.train_weights**2, axis=0)
+        cross = np.dot(test_weights.T, self.train_weights)
+        dist_sq = test_sq[:, np.newaxis] + train_sq - 2 * cross
 
-if __name__ == '__main__':
-    recognizer = FaceRecognizer(script_directory + "\\att_faces",92,112)
-    recognizer.train()
-    recognizer.evaluate()
-    
+        predicted_indices = np.zeros(len(self.test_labels), dtype=int)
+
+        best_k = Config.CANDIDATE_K[0]
+        best_accuracy = -1
+        for k in Config.CANDIDATE_K:
+            for i in range(dist_sq.shape[0]):
+                distances = dist_sq[i, :]
+                best_index = self.kNNR_classifier(distances, k, self.train_labels)
+                predicted_indices[i] = best_index
+            accuracy = np.mean(self.train_labels[predicted_indices] == self.test_labels)
+            if accuracy > best_accuracy:
+                best_accuracy = accuracy
+                best_k = k
+            print(f"K={k}, Accuracy={accuracy}")
+
+        self.k = best_k
+        print("Final Accuracy:", best_accuracy)
+        return best_accuracy
+
+    def predict(self, img):
+        if not self.is_model_trained:
+            print("Model not trained yet!")
+            return -1
+
+        img_vector = img.reshape((-1, 1))
+        img_centered = img_vector - self.mean_face
+        img_weights = np.dot(self.eigenfaces.T, img_centered)
+        img_weights_norms = np.linalg.norm(img_weights, axis=0, keepdims=True)
+        img_weights_norms[img_weights_norms == 0] = 1
+        img_weights /= img_weights_norms
+
+        dists = np.sum((self.train_weights - img_weights) ** 2, axis=0)
+        best_index = self.kNNR_classifier(dists, self.k, self.train_labels)
+
+        min_distance = dists[best_index]
+        if min_distance > self.distance_threshold:
+            return -1
+        # print("Predicted label:", self.train_labels[best_index])
+        return best_index
+
+    def kNNR_classifier(self, distances, k, train_labels):
+        knn_indices = np.argpartition(distances, k - 1)[:k]
+        knn_labels = train_labels[knn_indices]
+
+        unique_labels, counts = np.unique(knn_labels, return_counts=True)
+        max_count = counts.max()
+        candidate_labels = unique_labels[counts == max_count]
+
+        best_index = None
+        best_distance = float("inf")
+        for label in candidate_labels:
+            indices = knn_indices[knn_labels == label]
+            local_idx = indices[np.argmin(distances[indices])]
+            if distances[local_idx] < best_distance:
+                best_distance = distances[local_idx]
+                best_index = local_idx
+
+        return best_index
