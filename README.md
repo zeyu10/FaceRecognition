@@ -518,8 +518,8 @@ def enhance_image(self, image, remove_background=True):
 
 | 数据集 | 测试样本数 | 正确识别数 | 识别率 | 备注 |
 |---|---|---|---|---|
-| Att_Faces | 训练 xx 张，测试 xx 张 | xx | xx% | 无背景干扰，识别率较高。 |
-| Dataset_Pure | 训练 xx 张，测试 xx 张 | xx | xx% | 无背景干扰，识别率较高。 |
+| Att_Faces | 训练 xx 张，测试 xx 张 | xx | xx% | xx |
+| Dataset_Pure | 训练 xx 张，测试 xx 张 | xx | xx% | xx |
 
 ### 2. 对于调用摄像头测试
 
